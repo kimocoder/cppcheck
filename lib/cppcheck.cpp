@@ -1312,6 +1312,75 @@ void CppCheck::getErrorMessages()
     Preprocessor::getErrorMessages(this, &s);
 }
 
+void CppCheck::analyseClangTidy(const ImportProject::FileSettings &fileSettings )
+{
+    std::string allIncludes = "";
+    std::string allDefines = "-D"+fileSettings.defines;
+    for (const std::string &inc : fileSettings.includePaths) {
+        allIncludes = allIncludes + "-I""" + inc + """ ";
+    }
+
+    std::string::size_type pos = 0u;
+    while ((pos = allDefines.find(";", pos)) != std::string::npos)
+    {
+        allDefines.replace(pos, 1, " -D");
+        pos += 3;
+    }
+
+    const std::string cmd = "clang-tidy -quiet -checks=*,-clang-analyzer-*,-llvm* " + fileSettings.filename + " -- " + allIncludes + allDefines;
+
+    std::pair<bool, std::string> result = executeCommand(cmd);
+    if (!result.first) {
+       std::cerr << "Failed to execute '" + cmd + "'" << std::endl;
+       return;
+    }
+
+    // parse output and create error messages
+    std::istringstream istr(result.second);
+    std::string line;
+
+    while (std::getline(istr, line)) {
+        if (line.find("error") != std::string::npos || line.find("warning") != std::string::npos) {
+            std::vector<std::string> lineParts = split(line, " ");
+            std::size_t endColumnPos = lineParts[0].find_last_of(':', lineParts[0].length()-1);
+            std::size_t endLineNumPos = lineParts[0].find_last_of(':', endColumnPos-1);
+            std::size_t endNamePos = lineParts[0].find_last_of(':', endLineNumPos-1);
+            std::string fixedpath = Path::simplifyPath(lineParts[0].substr(0, endNamePos));
+            const std::string strLineNumber = lineParts[0].substr(endNamePos+1, endLineNumPos-endNamePos-1);
+            const std::string strColumNumber = lineParts[0].substr(endLineNumPos + 1, endColumnPos-endLineNumPos-1);
+            const int64_t lineNumber = std::atol(strLineNumber.c_str());
+            const int64_t column = std::atol(strColumNumber.c_str());
+            fixedpath = Path::toNativeSeparators(fixedpath);
+
+
+            for (const std::string &id : lineParts) {
+                if (id[0] == '[') {
+                    ErrorLogger::ErrorMessage errmsg;
+                    errmsg.callStack.emplace_back(ErrorLogger::ErrorMessage::FileLocation(fixedpath, lineNumber, column));
+
+                    errmsg.id = "clang-tidy-" + id.substr(1, id.length() - 2);
+                    if (errmsg.id.find("performance") != std::string::npos)
+                       errmsg.severity = Severity::SeverityType::performance;
+                    else if (errmsg.id.find("portability") != std::string::npos)
+                        errmsg.severity = Severity::SeverityType::portability;
+                    else if (errmsg.id.find("cert") != std::string::npos || errmsg.id.find("misc") != std::string::npos || errmsg.id.find("unused") != std::string::npos)
+                        errmsg.severity = Severity::SeverityType::warning;
+                    else
+                        errmsg.severity = Severity::SeverityType::style;
+
+                    errmsg.file0 = fixedpath;
+                    std::size_t startOfMsg = line.find_last_of(':')+1;
+                    std::size_t endOfMsg = line.find('[')-1;
+
+                    errmsg.setmsg(line.substr(startOfMsg, endOfMsg - startOfMsg));
+                    reportErr(errmsg);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 bool CppCheck::analyseWholeProgram()
 {
     bool errors = false;
